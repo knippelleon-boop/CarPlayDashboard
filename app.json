@@ -2,6 +2,7 @@
   "expo": {
     "name": "CarDashboard",
     "slug": "cardashboard",
+    "scheme": "cardashboard",
     "version": "1.0.0",
     "orientation": "default",
     "userInterfaceStyle": "dark",
@@ -9,7 +10,7 @@
       "supportsTablet": false,
       "bundleIdentifier": "de.eigenbedarf.cardashboard",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Wird benoetigt, um deine aktuelle Position auf der Karte anzuzeigen.",
+        "NSLocationWhenInUseUsageDescription": "Wird benoetigt, um deine aktuelle Position und Route auf der Karte anzuzeigen.",
         "NSContactsUsageDescription": "Wird benoetigt, um deine Kontakte fuer Schnellanrufe im Auto anzuzeigen.",
         "LSApplicationQueriesSchemes": [
           "comgooglemaps",
