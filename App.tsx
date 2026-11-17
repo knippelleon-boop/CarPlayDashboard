@@ -21,9 +21,7 @@ import { makeRedirectUri, useAuthRequest, ResponseType } from 'expo-auth-session
 
 WebBrowser.maybeCompleteAuthSession();
 
-// OPTIONAL: Trage hier deine kostenlose Client-ID aus dem Spotify Developer Dashboard ein
-// (https://developer.spotify.com/dashboard -> App erstellen -> Redirect URI: cardashboard://)
-const SPOTIFY_CLIENT_ID = 'DEINE_SPOTIFY_CLIENT_ID';
+const SPOTIFY_CLIENT_ID = '1f58a4a457b14341b9c7f7240a3529b6';
 
 const spotifyDiscovery = {
   authorizationEndpoint: 'https://accounts.spotify.com/authorize',
@@ -71,7 +69,10 @@ export default function App() {
   const [spotifyToken, setSpotifyToken] = useState<string | null>(null);
   const [track, setTrack] = useState<TrackInfo | null>(null);
 
-  const redirectUri = makeRedirectUri({ scheme: 'cardashboard' });
+  const redirectUri = makeRedirectUri({
+    scheme: 'cardashboard',
+    path: 'callback',
+  });
 
   const [request, response, promptAsync] = useAuthRequest(
     {
@@ -342,22 +343,14 @@ export default function App() {
             ) : (
               <View style={styles.spotifyConnectBox}>
                 <Text style={styles.hintText}>
-                  {SPOTIFY_CLIENT_ID === 'DEINE_SPOTIFY_CLIENT_ID'
-                    ? 'Spotify öffnet direkt oder verbinde deine Client-ID.'
-                    : 'Mit Spotify verbinden für Live-Songtitel'}
+                  Mit Spotify verbinden für Live-Songtitel
                 </Text>
                 <TouchableOpacity
                   style={styles.spotifyBtn}
-                  onPress={() => {
-                    if (SPOTIFY_CLIENT_ID === 'DEINE_SPOTIFY_CLIENT_ID') {
-                      Linking.openURL('spotify://');
-                    } else {
-                      promptAsync();
-                    }
-                  }}
+                  onPress={() => promptAsync()}
                 >
                   <Text style={styles.spotifyBtnText}>
-                    {SPOTIFY_CLIENT_ID === 'DEINE_SPOTIFY_CLIENT_ID' ? 'Spotify öffnen' : 'Mit Spotify verbinden'}
+                    Mit Spotify verbinden
                   </Text>
                 </TouchableOpacity>
               </View>
