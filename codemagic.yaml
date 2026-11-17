@@ -10,6 +10,8 @@ workflows:
         script: npm install
       - name: Expo Prebuild
         script: npx expo prebuild --platform ios --no-install
+      - name: Bundle JS
+        script: npx expo export:embed --platform ios --entry-file index.ts --bundle-output ios/main.jsbundle --assets-dest ios
       - name: CocoaPods
         script: cd ios && pod install
       - name: Build Device App
