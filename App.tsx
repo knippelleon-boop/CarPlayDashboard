@@ -4,302 +4,392 @@ import {
   Text,
   View,
   TouchableOpacity,
-  Linking,
+  TextInput,
   FlatList,
-  SafeAreaView,
-  StatusBar,
+  Image,
+  Linking,
   Alert,
+  StatusBar,
   useWindowDimensions,
+  SafeAreaView,
 } from 'react-native';
-import MapView from 'react-native-maps';
+import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Contacts from 'expo-contacts';
-import * as ScreenOrientation from 'expo-screen-orientation';
-import { Ionicons, FontAwesome5 } from '@expo/vector-icons';
+import * as WebBrowser from 'expo-web-browser';
+import { makeRedirectUri, useAuthRequest, ResponseType } from 'expo-auth-session';
 
-type ActiveTab = 'dashboard' | 'contacts';
+WebBrowser.maybeCompleteAuthSession();
+
+// OPTIONAL: Trage hier deine kostenlose Client-ID aus dem Spotify Developer Dashboard ein
+// (https://developer.spotify.com/dashboard -> App erstellen -> Redirect URI: cardashboard://)
+const SPOTIFY_CLIENT_ID = 'DEINE_SPOTIFY_CLIENT_ID';
+
+const spotifyDiscovery = {
+  authorizationEndpoint: 'https://accounts.spotify.com/authorize',
+  tokenEndpoint: 'https://accounts.spotify.com/api/token',
+};
+
+interface QuickContact {
+  id: string;
+  name: string;
+  phone: string;
+}
+
+interface TrackInfo {
+  title: string;
+  artist: string;
+  albumArt?: string;
+  isPlaying: boolean;
+}
 
 export default function App() {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
 
-  const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
-  const [orientationLocked, setOrientationLocked] = useState<
-    'auto' | 'landscape' | 'portrait'
-  >('auto');
+  // Uhrzeit & Datum
+  const [timeStr, setTimeStr] = useState('');
+  const [dateStr, setDateStr] = useState('');
+
+  // Standort & Apple Maps Route
   const [region, setRegion] = useState({
-    latitude: 50.2581,
-    longitude: 9.2814,
-    latitudeDelta: 0.015,
-    longitudeDelta: 0.015,
+    latitude: 50.2586,
+    longitude: 9.2903,
+    latitudeDelta: 0.02,
+    longitudeDelta: 0.02,
   });
-  const [contacts, setContacts] = useState<Contacts.Contact[]>([]);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState('');
+  const [userCoords, setUserCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [destCoords, setDestCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [destinationInput, setDestinationInput] = useState('');
+  const [routeLabel, setRouteLabel] = useState<string | null>(null);
 
+  // Echte iPhone-Kontakte
+  const [contacts, setContacts] = useState<QuickContact[]>([]);
+  const [contactsStatus, setContactsStatus] = useState('Lade Kontakte...');
+
+  // Spotify Status
+  const [spotifyToken, setSpotifyToken] = useState<string | null>(null);
+  const [track, setTrack] = useState<TrackInfo | null>(null);
+
+  const redirectUri = makeRedirectUri({ scheme: 'cardashboard' });
+
+  const [request, response, promptAsync] = useAuthRequest(
+    {
+      responseType: ResponseType.Token,
+      clientId: SPOTIFY_CLIENT_ID,
+      scopes: [
+        'user-read-currently-playing',
+        'user-read-playback-state',
+        'user-modify-playback-state',
+      ],
+      usePKCE: false,
+      redirectUri,
+    },
+    spotifyDiscovery
+  );
+
+  // 1. Live-Uhrzeit aktualisieren
   useEffect(() => {
-    // Standardmäßig automatische Drehung erlauben
-    ScreenOrientation.unlockAsync();
-
-    // Uhrzeit aktualisieren
-    const timer = setInterval(() => {
+    const updateClock = () => {
       const now = new Date();
-      setCurrentTime(
-        now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
-      );
-    }, 1000);
-
-    // Standort abrufen
-    (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status === 'granted') {
-        const loc = await Location.getCurrentPositionAsync({});
-        setRegion((prev) => ({
-          ...prev,
-          latitude: loc.coords.latitude,
-          longitude: loc.coords.longitude,
-        }));
-      }
-    })();
-
-    // Kontakte laden
-    (async () => {
-      const { status } = await Contacts.requestPermissionsAsync();
-      if (status === 'granted') {
-        const { data } = await Contacts.getContactsAsync({
-          fields: [Contacts.Fields.PhoneNumbers],
-        });
-        const valid = data.filter(
-          (c) => c.phoneNumbers && c.phoneNumbers.length > 0
-        );
-        setContacts(valid.slice(0, 30));
-      }
-    })();
-
+      setTimeStr(now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }));
+      setDateStr(now.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: 'short' }));
+    };
+    updateClock();
+    const timer = setInterval(updateClock, 1000);
     return () => clearInterval(timer);
   }, []);
 
-  // Manueller Umschalter zwischen Hochformat, Querformat und Auto
-  const toggleOrientation = async () => {
-    if (isLandscape) {
-      await ScreenOrientation.lockAsync(
-        ScreenOrientation.OrientationLock.PORTRAIT_UP
+  // 2. Live-GPS Standort für Apple Maps anfordern
+  useEffect(() => {
+    let locationSub: Location.LocationSubscription | null = null;
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Standort deaktiviert', 'Bitte erlaube den Standortzugriff in den iPhone-Einstellungen.');
+        return;
+      }
+      const current = await Location.getCurrentPositionAsync({});
+      const coords = {
+        latitude: current.coords.latitude,
+        longitude: current.coords.longitude,
+      };
+      setUserCoords(coords);
+      setRegion((prev) => ({ ...prev, ...coords }));
+
+      locationSub = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.High, distanceInterval: 15 },
+        (loc) => {
+          setUserCoords({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
+        }
       );
-      setOrientationLocked('portrait');
-    } else {
-      await ScreenOrientation.lockAsync(
-        ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT
-      );
-      setOrientationLocked('landscape');
+    })();
+    return () => {
+      if (locationSub) locationSub.remove();
+    };
+  }, []);
+
+  // 3. Echte iPhone-Kontakte laden
+  useEffect(() => {
+    (async () => {
+      const { status } = await Contacts.requestPermissionsAsync();
+      if (status !== 'granted') {
+        setContactsStatus('Kein Zugriff auf Kontakte erlaubt');
+        return;
+      }
+      const { data } = await Contacts.getContactsAsync({
+        fields: [Contacts.Fields.PhoneNumbers, Contacts.Fields.Name],
+      });
+
+      const validContacts: QuickContact[] = data
+        .filter((c) => c.name && c.phoneNumbers && c.phoneNumbers.length > 0)
+        .slice(0, 12)
+        .map((c, idx) => ({
+          id: c.id || String(idx),
+          name: c.name || 'Unbekannt',
+          phone: c.phoneNumbers![0].number || '',
+        }));
+
+      if (validContacts.length === 0) {
+        setContactsStatus('Keine Kontakte mit Telefonnummer gefunden');
+      } else {
+        setContacts(validContacts);
+      }
+    })();
+  }, []);
+
+  // 4. Spotify Login-Antwort verarbeiten & aktuellen Song abrufen
+  useEffect(() => {
+    if (response?.type === 'success') {
+      const { access_token } = response.params;
+      setSpotifyToken(access_token);
+    }
+  }, [response]);
+
+  useEffect(() => {
+    if (!spotifyToken) return;
+
+    const fetchCurrentTrack = async () => {
+      try {
+        const res = await fetch('https://api.spotify.com/v1/me/player/currently-playing', {
+          headers: { Authorization: `Bearer ${spotifyToken}` },
+        });
+        if (res.status === 204 || res.status > 400) return;
+        const json = await res.json();
+        if (json && json.item) {
+          setTrack({
+            title: json.item.name,
+            artist: json.item.artists.map((a: any) => a.name).join(', '),
+            albumArt: json.item.album?.images?.[0]?.url,
+            isPlaying: json.is_playing,
+          });
+        }
+      } catch {
+        // Stiller Fallback bei Netzwerkwechsel unterwegs
+      }
+    };
+
+    fetchCurrentTrack();
+    const poll = setInterval(fetchCurrentTrack, 4000);
+    return () => clearInterval(poll);
+  }, [spotifyToken]);
+
+  // Route auf der Karte einzeichnen
+  const handleSearchRoute = async () => {
+    if (!destinationInput.trim()) return;
+    try {
+      const results = await Location.geocodeAsync(destinationInput);
+      if (results.length > 0) {
+        const target = {
+          latitude: results[0].latitude,
+          longitude: results[0].longitude,
+        };
+        setDestCoords(target);
+        setRouteLabel(destinationInput.trim());
+        setRegion({
+          latitude: target.latitude,
+          longitude: target.longitude,
+          latitudeDelta: 0.05,
+          longitudeDelta: 0.05,
+        });
+      } else {
+        Alert.alert('Ziel nicht gefunden', 'Bitte gib eine genauere Adresse oder Stadt ein.');
+      }
+    } catch {
+      Alert.alert('Fehler', 'Adresse konnte nicht gesucht werden.');
     }
   };
 
-  const openGoogleMaps = async () => {
-    const url = 'comgooglemaps://';
-    const supported = await Linking.canOpenURL(url);
-    if (supported) {
-      await Linking.openURL(url);
-    } else {
-      Linking.openURL('https://maps.google.com');
+  // Sprachnavigation direkt in Apple Maps starten
+  const openAppleMapsTurnByTurn = () => {
+    if (!destCoords) return;
+    const url = `http://maps.apple.com/?daddr=${destCoords.latitude},${destCoords.longitude}&dirflg=d`;
+    Linking.openURL(url);
+  };
+
+  // Spotify Steuerung
+  const controlSpotify = async (action: 'play' | 'pause' | 'next' | 'previous') => {
+    if (!spotifyToken) {
+      Linking.openURL('spotify://');
+      return;
+    }
+    const method = action === 'next' || action === 'previous' ? 'POST' : 'PUT';
+    await fetch(`https://api.spotify.com/v1/me/player/${action}`, {
+      method,
+      headers: { Authorization: `Bearer ${spotifyToken}` },
+    });
+    if (track && (action === 'play' || action === 'pause')) {
+      setTrack({ ...track, isPlaying: action === 'play' });
     }
   };
 
-  const openSpotify = async () => {
-    const url = 'spotify://';
-    const supported = await Linking.canOpenURL(url);
-    if (supported) {
-      await Linking.openURL(url);
-    } else {
-      Alert.alert('Spotify', 'Spotify ist auf diesem iPhone nicht installiert.');
-    }
-  };
-
-  const callNumber = (phoneNumber?: string) => {
-    if (!phoneNumber) return;
-    const cleaned = phoneNumber.replace(/[^0-9+]/g, '');
+  const callContact = (phone: string) => {
+    const cleaned = phone.replace(/\s+/g, '');
     Linking.openURL(`tel:${cleaned}`);
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar hidden={isLandscape} barStyle="light-content" />
+      <StatusBar barStyle="light-content" />
 
-      <View
-        style={[
-          styles.mainLayout,
-          isLandscape ? styles.layoutLandscape : styles.layoutPortrait,
-        ]}
-      >
-        {/* CarPlay-Dock: Im Querformat links, im Hochformat unten */}
-        <View
-          style={[
-            styles.sidebar,
-            isLandscape ? styles.sidebarLandscape : styles.sidebarPortrait,
-          ]}
-        >
-          <Text style={styles.clock}>{currentTime || '12:00'}</Text>
+      {/* Obere Statusleiste */}
+      <View style={styles.topBar}>
+        <Text style={styles.clockText}>{timeStr}</Text>
+        <Text style={styles.appTitle}>CAR DASHBOARD</Text>
+        <Text style={styles.dateText}>{dateStr}</Text>
+      </View>
 
-          <TouchableOpacity style={styles.dockIcon} onPress={openGoogleMaps}>
-            <Ionicons name="navigate-circle" size={34} color="#4285F4" />
-          </TouchableOpacity>
+      {/* Hauptbereich: Querformat nebeneinander, Hochformat untereinander */}
+      <View style={[styles.mainGrid, { flexDirection: isLandscape ? 'row' : 'column' }]}>
+        
+        {/* LINKE SEITE: Apple Maps Live-Karte & Route */}
+        <View style={[styles.card, { flex: isLandscape ? 1.35 : 1.1 }]}>
+          <View style={styles.searchRow}>
+            <TextInput
+              style={styles.input}
+              placeholder="Ziel eingeben (z. B. Frankfurt Hbf)..."
+              placeholderTextColor="#8E8E93"
+              value={destinationInput}
+              onChangeText={setDestinationInput}
+              onSubmitEditing={handleSearchRoute}
+              returnKeyType="search"
+            />
+            <TouchableOpacity style={styles.goBtn} onPress={handleSearchRoute}>
+              <Text style={styles.goBtnText}>Route</Text>
+            </TouchableOpacity>
+          </View>
 
-          <TouchableOpacity style={styles.dockIcon} onPress={openSpotify}>
-            <FontAwesome5 name="spotify" size={30} color="#1DB954" />
-          </TouchableOpacity>
+          <View style={styles.mapWrapper}>
+            <MapView
+              style={styles.map}
+              region={region}
+              showsUserLocation={true}
+              followsUserLocation={!destCoords}
+              userInterfaceStyle="dark"
+            >
+              {destCoords && <Marker coordinate={destCoords} title={routeLabel || 'Ziel'} />}
+              {userCoords && destCoords && (
+                <Polyline
+                  coordinates={[userCoords, destCoords]}
+                  strokeColor="#0A84FF"
+                  strokeWidth={5}
+                />
+              )}
+            </MapView>
 
-          <TouchableOpacity
-            style={[
-              styles.dockIcon,
-              activeTab === 'contacts' && styles.dockIconActive,
-            ]}
-            onPress={() =>
-              setActiveTab(activeTab === 'contacts' ? 'dashboard' : 'contacts')
-            }
-          >
-            <Ionicons name="call" size={28} color="#34C759" />
-          </TouchableOpacity>
-
-          {/* Button zum Drehen zwischen Hoch- und Querformat */}
-          <TouchableOpacity
-            style={styles.dockIcon}
-            onPress={toggleOrientation}
-          >
-            <Ionicons name="phone-portrait-outline" size={26} color="#FF9F0A" />
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.gridButton}
-            onPress={() => setActiveTab('dashboard')}
-          >
-            <Ionicons name="apps" size={26} color="#FFFFFF" />
-          </TouchableOpacity>
+            {destCoords && (
+              <TouchableOpacity style={styles.navStartBanner} onPress={openAppleMapsTurnByTurn}>
+                <Text style={styles.navStartText}>
+                  Navigation nach „{routeLabel}“ starten ➔
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
 
-        {/* Hauptbereich */}
-        {activeTab === 'dashboard' ? (
-          <View
-            style={[
-              styles.dashboardGrid,
-              isLandscape ? styles.gridLandscape : styles.gridPortrait,
-            ]}
-          >
-            {/* Karten-Widget */}
-            <View
-              style={[
-                styles.mapCard,
-                isLandscape ? { flex: 1.25 } : { flex: 1.15 },
-              ]}
-            >
-              <MapView
-                style={styles.map}
-                region={region}
-                showsUserLocation
-                userInterfaceStyle="dark"
-              />
-              <TouchableOpacity
-                style={styles.googleMapsOverlayBtn}
-                onPress={openGoogleMaps}
-              >
-                <Ionicons name="navigate" size={18} color="#fff" />
-                <Text style={styles.overlayBtnText}>Google Maps Route</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Rechte / Untere Widgets (Spotify + Telefon) */}
-            <View
-              style={[
-                styles.widgetsColumn,
-                isLandscape ? { flex: 1 } : { flex: 0.95 },
-              ]}
-            >
-              {/* Spotify-Widget */}
-              <View style={styles.musicCard}>
-                <View style={styles.musicHeader}>
-                  <FontAwesome5 name="spotify" size={20} color="#1DB954" />
-                  <Text style={styles.widgetLabel}>Spotify Player</Text>
-                </View>
-                <Text style={styles.trackTitle} numberOfLines={1}>
-                  Bereit zur Wiedergabe
-                </Text>
-                <Text style={styles.artistName} numberOfLines={1}>
-                  Tippe auf Spotify zum Starten
-                </Text>
-
-                <View style={styles.controlsRow}>
-                  <TouchableOpacity onPress={openSpotify}>
-                    <Ionicons name="play-skip-back" size={26} color="#fff" />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.playBtn}
-                    onPress={() => {
-                      setIsPlaying(!isPlaying);
-                      openSpotify();
-                    }}
-                  >
-                    <Ionicons
-                      name={isPlaying ? 'pause' : 'play'}
-                      size={26}
-                      color="#000"
-                    />
-                  </TouchableOpacity>
-                  <TouchableOpacity onPress={openSpotify}>
-                    <Ionicons name="play-skip-forward" size={26} color="#fff" />
-                  </TouchableOpacity>
+        {/* RECHTE SEITE: Spotify Musik & Echte Kontakte */}
+        <View style={[styles.rightColumn, { flex: 1 }]}>
+          
+          {/* Spotify Widget */}
+          <View style={styles.card}>
+            <Text style={styles.sectionHeader}>MUSIK (SPOTIFY)</Text>
+            {track ? (
+              <View style={styles.trackRow}>
+                {track.albumArt ? (
+                  <Image source={{ uri: track.albumArt }} style={styles.albumArt} />
+                ) : (
+                  <View style={[styles.albumArt, styles.albumPlaceholder]} />
+                )}
+                <View style={styles.trackMeta}>
+                  <Text style={styles.trackTitle} numberOfLines={1}>{track.title}</Text>
+                  <Text style={styles.trackArtist} numberOfLines={1}>{track.artist}</Text>
+                  <View style={styles.controlsRow}>
+                    <TouchableOpacity style={styles.ctrlBtn} onPress={() => controlSpotify('previous')}>
+                      <Text style={styles.ctrlText}>⏮</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.ctrlBtn, styles.playBtn]}
+                      onPress={() => controlSpotify(track.isPlaying ? 'pause' : 'play')}
+                    >
+                      <Text style={styles.ctrlText}>{track.isPlaying ? '⏸' : '▶'}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.ctrlBtn} onPress={() => controlSpotify('next')}>
+                      <Text style={styles.ctrlText}>⏭</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
               </View>
-
-              {/* Schnellzugriff Telefon & Kontakte */}
-              <TouchableOpacity
-                style={styles.phoneCard}
-                onPress={() => setActiveTab('contacts')}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.tempText}>Telefon & Kontakte</Text>
-                  <Text style={styles.subText} numberOfLines={1}>
-                    {contacts.length} Kontakte – Tippen zum Anrufen
-                  </Text>
-                </View>
-                <Ionicons name="people-circle" size={40} color="#34C759" />
-              </TouchableOpacity>
-            </View>
-          </View>
-        ) : (
-          /* Kontaktliste-Ansicht (passt Spaltenzahl an Hoch-/Querformat an) */
-          <View style={styles.contactsContainer}>
-            <View style={styles.contactsHeader}>
-              <Text style={styles.contactsTitle}>Kontakte</Text>
-              <TouchableOpacity
-                style={styles.backBtn}
-                onPress={() => setActiveTab('dashboard')}
-              >
-                <Text style={styles.backBtnText}>Dashboard</Text>
-              </TouchableOpacity>
-            </View>
-
-            <FlatList
-              key={isLandscape ? 'landscape-list' : 'portrait-list'}
-              data={contacts}
-              keyExtractor={(item, index) => item.id || String(index)}
-              numColumns={isLandscape ? 2 : 1}
-              renderItem={({ item }) => (
+            ) : (
+              <View style={styles.spotifyConnectBox}>
+                <Text style={styles.hintText}>
+                  {SPOTIFY_CLIENT_ID === 'DEINE_SPOTIFY_CLIENT_ID'
+                    ? 'Spotify öffnet direkt oder verbinde deine Client-ID.'
+                    : 'Mit Spotify verbinden für Live-Songtitel'}
+                </Text>
                 <TouchableOpacity
-                  style={styles.contactItem}
-                  onPress={() => callNumber(item.phoneNumbers?.[0]?.number)}
+                  style={styles.spotifyBtn}
+                  onPress={() => {
+                    if (SPOTIFY_CLIENT_ID === 'DEINE_SPOTIFY_CLIENT_ID') {
+                      Linking.openURL('spotify://');
+                    } else {
+                      promptAsync();
+                    }
+                  }}
                 >
-                  <Ionicons name="call" size={22} color="#34C759" />
-                  <View style={{ marginLeft: 12, flex: 1 }}>
-                    <Text style={styles.contactName} numberOfLines={1}>
-                      {item.name}
-                    </Text>
-                    <Text style={styles.contactNumber}>
-                      {item.phoneNumbers?.[0]?.number}
-                    </Text>
-                  </View>
+                  <Text style={styles.spotifyBtnText}>
+                    {SPOTIFY_CLIENT_ID === 'DEINE_SPOTIFY_CLIENT_ID' ? 'Spotify öffnen' : 'Mit Spotify verbinden'}
+                  </Text>
                 </TouchableOpacity>
-              )}
-            />
+              </View>
+            )}
           </View>
-        )}
+
+          {/* Echte iPhone-Kontakte */}
+          <View style={[styles.card, { flex: 1 }]}>
+            <Text style={styles.sectionHeader}>SCHNELLANRUF (KONTAKTE)</Text>
+            {contacts.length > 0 ? (
+              <FlatList
+                data={contacts}
+                keyExtractor={(item) => item.id}
+                numColumns={2}
+                columnWrapperStyle={{ gap: 8 }}
+                contentContainerStyle={{ gap: 8 }}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.contactChip}
+                    onPress={() => callContact(item.phone)}
+                  >
+                    <Text style={styles.contactName} numberOfLines={1}>{item.name}</Text>
+                    <Text style={styles.contactSub} numberOfLines={1}>Anrufen</Text>
+                  </TouchableOpacity>
+                )}
+              />
+            ) : (
+              <Text style={styles.hintText}>{contactsStatus}</Text>
+            )}
+          </View>
+
+        </View>
       </View>
     </SafeAreaView>
   );
@@ -309,195 +399,186 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#0B0D12',
+    paddingHorizontal: 12,
+    paddingTop: 6,
+    paddingBottom: 10,
   },
-  mainLayout: {
-    flex: 1,
-    padding: 10,
-  },
-  layoutLandscape: {
+  topBar: {
     flexDirection: 'row',
-  },
-  layoutPortrait: {
-    flexDirection: 'column-reverse',
-  },
-  sidebar: {
-    backgroundColor: '#161A23',
-    borderRadius: 20,
-    alignItems: 'center',
     justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingBottom: 8,
   },
-  sidebarLandscape: {
-    width: 72,
-    flexDirection: 'column',
-    paddingVertical: 12,
-    marginRight: 12,
-  },
-  sidebarPortrait: {
-    height: 70,
-    flexDirection: 'row',
-    paddingHorizontal: 14,
-    marginTop: 10,
-  },
-  clock: {
+  clockText: {
     color: '#FFFFFF',
-    fontSize: 14,
+    fontSize: 22,
     fontWeight: '700',
   },
-  dockIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 14,
-    backgroundColor: '#222834',
-    alignItems: 'center',
+  appTitle: {
+    color: '#64D2FF',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 1.5,
+  },
+  dateText: {
+    color: '#98989D',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  mainGrid: {
+    flex: 1,
+    gap: 10,
+  },
+  rightColumn: {
+    gap: 10,
+  },
+  card: {
+    backgroundColor: '#161922',
+    borderRadius: 18,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#252A38',
+  },
+  sectionHeader: {
+    color: '#8E8E93',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 8,
+  },
+  searchRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 8,
+  },
+  input: {
+    flex: 1,
+    backgroundColor: '#222634',
+    color: '#FFFFFF',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 15,
+  },
+  goBtn: {
+    backgroundColor: '#0A84FF',
+    borderRadius: 12,
+    paddingHorizontal: 16,
     justifyContent: 'center',
   },
-  dockIconActive: {
-    borderWidth: 2,
-    borderColor: '#34C759',
+  goBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 15,
   },
-  gridButton: {
-    padding: 6,
-  },
-  dashboardGrid: {
+  mapWrapper: {
     flex: 1,
-    gap: 12,
-  },
-  gridLandscape: {
-    flexDirection: 'row',
-  },
-  gridPortrait: {
-    flexDirection: 'column',
-  },
-  mapCard: {
-    borderRadius: 22,
+    borderRadius: 14,
     overflow: 'hidden',
-    backgroundColor: '#1C212B',
   },
   map: {
     flex: 1,
   },
-  googleMapsOverlayBtn: {
+  navStartBanner: {
     position: 'absolute',
-    bottom: 14,
-    left: 14,
-    backgroundColor: '#1A73E8',
+    bottom: 10,
+    left: 10,
+    right: 10,
+    backgroundColor: '#30D158',
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  navStartText: {
+    color: '#000000',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  trackRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 14,
-    gap: 8,
-  },
-  overlayBtnText: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  widgetsColumn: {
     gap: 12,
   },
-  musicCard: {
-    flex: 1.35,
-    backgroundColor: '#1C212B',
-    borderRadius: 22,
-    padding: 16,
-    justifyContent: 'space-between',
+  albumArt: {
+    width: 68,
+    height: 68,
+    borderRadius: 12,
   },
-  musicHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+  albumPlaceholder: {
+    backgroundColor: '#2C2C2E',
   },
-  widgetLabel: {
-    color: '#9BA3B4',
-    fontSize: 13,
-    fontWeight: '600',
+  trackMeta: {
+    flex: 1,
   },
   trackTitle: {
-    color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  artistName: {
-    color: '#9BA3B4',
-    fontSize: 13,
-  },
-  controlsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-around',
-    marginTop: 4,
-  },
-  playBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  phoneCard: {
-    flex: 0.75,
-    backgroundColor: '#1C212B',
-    borderRadius: 22,
-    paddingHorizontal: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  tempText: {
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
   },
-  subText: {
-    color: '#9BA3B4',
-    fontSize: 12,
-    marginTop: 2,
+  trackArtist: {
+    color: '#AEAEB2',
+    fontSize: 13,
+    marginBottom: 8,
   },
-  contactsContainer: {
-    flex: 1,
-    backgroundColor: '#161A23',
-    borderRadius: 22,
-    padding: 16,
-  },
-  contactsHeader: {
+  controlsRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
+    gap: 10,
   },
-  contactsTitle: {
+  ctrlBtn: {
+    backgroundColor: '#262B3A',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+  },
+  playBtn: {
+    backgroundColor: '#1DB954',
+  },
+  ctrlText: {
     color: '#FFFFFF',
-    fontSize: 20,
+    fontSize: 16,
     fontWeight: '700',
   },
-  backBtn: {
-    backgroundColor: '#2A3140',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 12,
-  },
-  backBtnText: {
-    color: '#FFFFFF',
-    fontWeight: '600',
-  },
-  contactItem: {
-    flex: 1,
+  spotifyConnectBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#222834',
-    padding: 14,
-    borderRadius: 14,
-    margin: 5,
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  spotifyBtn: {
+    backgroundColor: '#1DB954',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+  },
+  spotifyBtnText: {
+    color: '#000000',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  contactChip: {
+    flex: 1,
+    backgroundColor: '#222634',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2F3547',
   },
   contactName: {
     color: '#FFFFFF',
-    fontSize: 15,
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  contactSub: {
+    color: '#30D158',
+    fontSize: 12,
+    marginTop: 2,
     fontWeight: '600',
   },
-  contactNumber: {
-    color: '#9BA3B4',
+  hintText: {
+    color: '#98989D',
     fontSize: 13,
+    flex: 1,
   },
 });
