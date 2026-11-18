@@ -17,7 +17,12 @@ import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Contacts from 'expo-contacts';
 import * as WebBrowser from 'expo-web-browser';
-import { makeRedirectUri, useAuthRequest, ResponseType } from 'expo-auth-session';
+import {
+  makeRedirectUri,
+  useAuthRequest,
+  exchangeCodeAsync,
+  ResponseType,
+} from 'expo-auth-session';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -74,16 +79,17 @@ export default function App() {
     path: 'callback',
   });
 
+  // PKCE Flow (aktueller Spotify-Standard ohne Client-Secret)
   const [request, response, promptAsync] = useAuthRequest(
     {
-      responseType: ResponseType.Token,
+      responseType: ResponseType.Code,
       clientId: SPOTIFY_CLIENT_ID,
       scopes: [
         'user-read-currently-playing',
         'user-read-playback-state',
         'user-modify-playback-state',
       ],
-      usePKCE: false,
+      usePKCE: true,
       redirectUri,
     },
     spotifyDiscovery
@@ -159,14 +165,33 @@ export default function App() {
     })();
   }, []);
 
-  // 4. Spotify Login-Antwort verarbeiten & aktuellen Song abrufen
+  // 4. Spotify PKCE-Code gegen Access-Token tauschen
   useEffect(() => {
-    if (response?.type === 'success') {
-      const { access_token } = response.params;
-      setSpotifyToken(access_token);
+    if (response?.type === 'success' && request?.codeVerifier) {
+      const { code } = response.params;
+      exchangeCodeAsync(
+        {
+          clientId: SPOTIFY_CLIENT_ID,
+          code,
+          redirectUri,
+          extraParams: {
+            code_verifier: request.codeVerifier,
+          },
+        },
+        spotifyDiscovery
+      )
+        .then((tokenRes) => {
+          if (tokenRes.accessToken) {
+            setSpotifyToken(tokenRes.accessToken);
+          }
+        })
+        .catch(() => {
+          Alert.alert('Spotify-Fehler', 'Anmeldung konnte nicht abgeschlossen werden.');
+        });
     }
   }, [response]);
 
+  // 5. Aktuellen Song von Spotify abrufen
   useEffect(() => {
     if (!spotifyToken) return;
 
