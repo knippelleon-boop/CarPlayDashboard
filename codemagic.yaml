@@ -7,7 +7,11 @@ workflows:
       xcode: latest
     scripts:
       - name: Install dependencies
-        script: npm install
+        script: |
+          rm -f package-lock.json
+          npm install --legacy-peer-deps
+          npx expo install --fix
+          npm install hermes-parser --save-dev --legacy-peer-deps
       - name: Expo Prebuild
         script: npx expo prebuild --platform ios --no-install
       - name: Test and Export JS Bundle
