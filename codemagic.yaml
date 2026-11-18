@@ -10,13 +10,19 @@ workflows:
         script: npm install
       - name: Expo Prebuild
         script: npx expo prebuild --platform ios --no-install
-      - name: Configure Xcode Node Environment
-        script: echo "export NODE_BINARY=$(which node)" > ios/.xcode.env.local
+      - name: Test and Export JS Bundle
+        script: |
+          mkdir -p ios_bundle
+          npx expo export:embed --platform ios --entry-file index.ts --bundle-output ios_bundle/main.jsbundle --assets-dest ios_bundle --dev false
       - name: CocoaPods
         script: cd ios && pod install
       - name: Build Device App
-        script: xcodebuild -workspace ios/CarDashboard.xcworkspace -scheme CarDashboard -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
-      - name: Package IPA
-        script: mkdir -p Payload && cp -r build/Build/Products/Release-iphoneos/CarDashboard.app Payload/ && zip -r CarDashboard.ipa Payload
+        script: SKIP_BUNDLING=1 xcodebuild -workspace ios/CarDashboard.xcworkspace -scheme CarDashboard -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+      - name: Embed JS Bundle and Package IPA
+        script: |
+          cp -r ios_bundle/* build/Build/Products/Release-iphoneos/CarDashboard.app/
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/CarDashboard.app Payload/
+          zip -r CarDashboard.ipa Payload
     artifacts:
       - CarDashboard.ipa
