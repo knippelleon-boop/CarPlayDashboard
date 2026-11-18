@@ -10,6 +10,8 @@ workflows:
         script: npm install
       - name: Expo Prebuild
         script: npx expo prebuild --platform ios --no-install
+      - name: Configure Xcode Node Environment
+        script: echo "export NODE_BINARY=$(which node)" > ios/.xcode.env.local
       - name: CocoaPods
         script: cd ios && pod install
       - name: Build Device App
